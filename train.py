@@ -82,7 +82,7 @@ def get_dataset(name, root='../data'):
     if name.lower() in ['emnist', 'fashionmnist']:
         transform = transforms.Compose([transforms.Resize(28), transforms.ToTensor(), transforms.Normalize([0.5], [0.5])])
         if name.lower() == 'emnist':
-            return datasets.EMNIST(root, split='balanced', train=True, download=True, transform=transform), datasets.EMNIST(root, split='balanced', train=False, download=True, transform=transform), 26
+            return datasets.EMNIST(os.path.join(root, 'emnist'), split='balanced', train=True, download=True, transform=transform), datasets.EMNIST(root, split='balanced', train=False, download=True, transform=transform), 26
         else:
             return datasets.FashionMNIST(root, train=True, download=True, transform=transform), datasets.FashionMNIST(root, train=False, download=True, transform=transform), 10
 
