@@ -1,3 +1,4 @@
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -53,10 +54,11 @@ class Discriminator(nn.Module):
 
 
 class Classifier(nn.Module):
-    def __init__(self, num_classes, img_channels=1):
+    def __init__(self, num_classes, img_channels, img_shape):
         super(Classifier, self).__init__()
+        c, h, w = img_shape
         self.conv = nn.Sequential(
-            nn.Conv2d(img_channels, 32, 3, 1, 1),
+            nn.Conv2d(c, 32, 3, 1, 1),
             nn.ReLU(),
             nn.MaxPool2d(2),
             nn.Conv2d(32, 64, 3, 1, 1),
@@ -65,7 +67,7 @@ class Classifier(nn.Module):
         )
         self.fc = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(64 * (img_shape[1]//4) * (img_shape[2]//4), 128),
+            nn.Linear(64 * (h // 4) * (w // 4), 128),
             nn.ReLU(),
             nn.Linear(128, num_classes)
         )
@@ -79,31 +81,51 @@ class Classifier(nn.Module):
 # -------------------------------
 
 def get_dataset(name, root='../data'):
-    if name.lower() in ['emnist', 'fashionmnist']:
-        transform = transforms.Compose([transforms.Resize(28), transforms.ToTensor(), transforms.Normalize([0.5], [0.5])])
-        if name.lower() == 'emnist':
-            return datasets.EMNIST(os.path.join(root, 'emnist'), split='balanced', train=True, download=True, transform=transform), datasets.EMNIST(os.path.join(root, 'emnist'), split='balanced', train=False, download=True, transform=transform), 26
+    name = name.lower()
+    if name in ['emnist', 'fashionmnist']:
+        transform = transforms.Compose([
+            transforms.Resize(28),
+            transforms.ToTensor(),
+            transforms.Normalize([0.5], [0.5])
+        ])
+        if name == 'emnist':
+            train = datasets.EMNIST(os.path.join(root, 'emnist'), split='balanced', train=True, download=True, transform=transform)
+            test = datasets.EMNIST(os.path.join(root, 'emnist'), split='balanced', train=False, download=True, transform=transform)
+            num_classes = len(train.classes)
         else:
-            return datasets.FashionMNIST(root, train=True, download=True, transform=transform), datasets.FashionMNIST(root, train=False, download=True, transform=transform), 10
-
-    elif name.lower() in ['cifar10', 'svhn']:
-        transform = transforms.Compose([transforms.Resize(32), transforms.ToTensor(), transforms.Normalize([0.5]*3, [0.5]*3)])
-        if name.lower() == 'cifar10':
-            return datasets.CIFAR10(root, train=True, download=True, transform=transform), datasets.CIFAR10(root, train=False, download=True, transform=transform), 10
+            train = datasets.FashionMNIST(root, train=True, download=True, transform=transform)
+            test = datasets.FashionMNIST(root, train=False, download=True, transform=transform)
+            num_classes = 10
+    elif name in ['cifar10', 'svhn']:
+        transform = transforms.Compose([
+            transforms.Resize(32),
+            transforms.ToTensor(),
+            transforms.Normalize([0.5] * 3, [0.5] * 3)
+        ])
+        if name == 'cifar10':
+            train = datasets.CIFAR10(root, train=True, download=True, transform=transform)
+            test = datasets.CIFAR10(root, train=False, download=True, transform=transform)
+            num_classes = 10
         else:
-            return datasets.SVHN(root, split='train', download=True, transform=transform), datasets.SVHN(root, split='test', download=True, transform=transform), 10
+            # SVHN labels are in {1..10} with 10 meaning digit 0, so remap to 0..9
+            train = datasets.SVHN(root, split='train', download=True, transform=transform)
+            test = datasets.SVHN(root, split='test', download=True, transform=transform)
+            # remap labels array in place
+            train.labels = train.labels % 10
+            test.labels = test.labels % 10
+            num_classes = 10
     else:
         raise ValueError(f"Unknown dataset {name}")
+    return train, test, num_classes
 
 
 def partition_indices(dataset, num_clients):
-    # IID partition
     num_items = len(dataset)
     indices = np.random.permutation(num_items)
     return np.array_split(indices, num_clients)
 
 # -------------------------------
-# Federated One-Shot
+# Training Functions
 # -------------------------------
 
 def train_local_gan(dataloader, latent_dim, num_classes, img_shape, device, epochs=5):
@@ -122,7 +144,8 @@ def train_local_gan(dataloader, latent_dim, num_classes, img_shape, device, epoc
             real_imgs = imgs.to(device)
             labels = labels.to(device)
 
-            # Train G
+            # Train Generator
+            G.train()
             optimizer_G.zero_grad()
             z = torch.randn(batch_size, latent_dim, device=device)
             gen_labels = torch.randint(0, num_classes, (batch_size,), device=device)
@@ -131,7 +154,8 @@ def train_local_gan(dataloader, latent_dim, num_classes, img_shape, device, epoc
             g_loss.backward()
             optimizer_G.step()
 
-            # Train D
+            # Train Discriminator
+            D.train()
             optimizer_D.zero_grad()
             real_loss = criterion(D(real_imgs, labels), valid)
             fake_loss = criterion(D(gen_imgs.detach(), gen_labels), fake)
@@ -143,31 +167,30 @@ def train_local_gan(dataloader, latent_dim, num_classes, img_shape, device, epoc
 
 
 def generate_synthetic(G_clients, latent_dim, num_classes, samples_per_class, device):
-    synth_imgs = []
-    synth_labels = []
+    synth_imgs, synth_labels = [], []
     for cls in range(num_classes):
         z = torch.randn(samples_per_class, latent_dim, device=device)
         labels = torch.full((samples_per_class,), cls, dtype=torch.long, device=device)
-        # average generation across clients
-        imgs_sum = 0
+        imgs_sum = torch.zeros((samples_per_class, *G_clients[0].img_shape), device=device)
         for G in G_clients:
             G.eval()
             with torch.no_grad():
                 imgs_sum += G(z, labels)
-        imgs = (imgs_sum / len(G_clients)).cpu()
-        synth_imgs.append(imgs)
+        avg_imgs = (imgs_sum / len(G_clients)).cpu()
+        synth_imgs.append(avg_imgs)
         synth_labels.append(labels.cpu())
     return torch.cat(synth_imgs), torch.cat(synth_labels)
 
 
 def train_classifier(train_imgs, train_labels, num_classes, img_channels, device, epochs=10, batch_size=128):
-    clf = Classifier(num_classes, img_channels).to(device)
+    clf = Classifier(num_classes, img_channels, train_imgs.shape[1:]).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(clf.parameters(), lr=1e-3)
     dataset = torch.utils.data.TensorDataset(train_imgs, train_labels)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     for epoch in range(epochs):
+        clf.train()
         for imgs, labels in loader:
             imgs, labels = imgs.to(device), labels.to(device)
             optimizer.zero_grad()
@@ -181,9 +204,7 @@ def train_classifier(train_imgs, train_labels, num_classes, img_channels, device
 
 def evaluate(clf, test_loader, device):
     clf.eval()
-    all_preds = []
-    all_probs = []
-    all_labels = []
+    all_preds, all_probs, all_labels = [], [], []
     with torch.no_grad():
         for imgs, labels in test_loader:
             imgs = imgs.to(device)
@@ -194,7 +215,6 @@ def evaluate(clf, test_loader, device):
             all_probs.extend(probs.cpu().numpy())
             all_labels.extend(labels.numpy())
     acc = accuracy_score(all_labels, all_preds)
-    # multiclass ROC AUC (one-vs-rest)
     try:
         auc = roc_auc_score(pd.get_dummies(all_labels), all_probs, average='macro')
     except ValueError:
@@ -202,46 +222,34 @@ def evaluate(clf, test_loader, device):
     return acc, auc
 
 # -------------------------------
-# Main Federated Routine
+# Federated One-Shot Flow
 # -------------------------------
 
 def federated_one_shot(dataset_name, num_clients=5, local_epochs=5, synth_per_class=100, device='cuda'):
     device = torch.device(device if torch.cuda.is_available() else 'cpu')
     train_set, test_set, num_classes = get_dataset(dataset_name)
-    global img_shape
-    if hasattr(train_set, 'data'):
-        # get shape from first sample
-        sample, _ = train_set[0]
-        img_shape = sample.shape
-    else:
-        sample, _ = train_set[0]
-        img_shape = sample.shape
+    sample_img, _ = train_set[0]
+    img_shape = sample_img.shape
 
-    # Partition data among clients
     client_idxs = partition_indices(train_set, num_clients)
     G_clients = []
     for i, idxs in enumerate(client_idxs):
         logging.info(f"Training client {i} GAN on {len(idxs)} samples...")
         subset = Subset(train_set, idxs)
-        dataloader = DataLoader(subset, batch_size=64, shuffle=True)
-        G = train_local_gan(dataloader, latent_dim=100, num_classes=num_classes, img_shape=img_shape, device=device, epochs=local_epochs)
+        loader = DataLoader(subset, batch_size=64, shuffle=True)
+        G = train_local_gan(loader, latent_dim=100, num_classes=num_classes, img_shape=img_shape, device=device, epochs=local_epochs)
         G_clients.append(G)
 
-    # Server: generate synthetic data
     logging.info("Generating synthetic data at server...")
     synth_imgs, synth_labels = generate_synthetic(G_clients, latent_dim=100, num_classes=num_classes, samples_per_class=synth_per_class, device=device)
 
-    # Train global classifier
     logging.info("Training global classifier on synthetic data...")
-    img_channels = img_shape[0]
-    clf = train_classifier(synth_imgs, synth_labels, num_classes, img_channels, device, epochs=10)
+    clf = train_classifier(synth_imgs, synth_labels, num_classes, img_shape[0], device, epochs=10)
 
-    # Evaluate on global test set
     test_loader = DataLoader(test_set, batch_size=128, shuffle=False)
     acc, auc = evaluate(clf, test_loader, device)
     logging.info(f"Final Test Accuracy: {acc:.4f}, Test AUROC: {auc:.4f}")
 
-    # Save metrics
     metrics = pd.DataFrame([{'dataset': dataset_name, 'accuracy': acc, 'auc': auc}])
     out_file = f"metrics_{dataset_name}.csv"
     metrics.to_csv(out_file, index=False)
