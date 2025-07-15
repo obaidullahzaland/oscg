@@ -182,7 +182,7 @@ def generate_synthetic(G_clients, latent_dim, num_classes, samples_per_class, de
     return torch.cat(synth_imgs), torch.cat(synth_labels)
 
 
-def train_classifier(train_imgs, train_labels, num_classes, img_channels, device, epochs=10, batch_size=128):
+def train_classifier(train_imgs, train_labels, num_classes, img_channels, device, epochs=25, batch_size=128):
     clf = Classifier(num_classes, img_channels, train_imgs.shape[1:]).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(clf.parameters(), lr=1e-3)
@@ -225,7 +225,7 @@ def evaluate(clf, test_loader, device):
 # Federated One-Shot Flow
 # -------------------------------
 
-def federated_one_shot(dataset_name, num_clients=5, local_epochs=5, synth_per_class=100, device='cuda'):
+def federated_one_shot(dataset_name, num_clients=5, local_epochs=25, synth_per_class=100, device='cuda'):
     device = torch.device(device if torch.cuda.is_available() else 'cpu')
     train_set, test_set, num_classes = get_dataset(dataset_name)
     sample_img, _ = train_set[0]
